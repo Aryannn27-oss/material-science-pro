@@ -5,12 +5,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import r2_score, mean_squared_error, accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import (r2_score, mean_squared_error, accuracy_score, classification_report,
+                              confusion_matrix, precision_recall_fscore_support)
 
-# Page config and lightweight dark styling
+MIN_CLASS_SAMPLES_FOR_CV = 10
+
 st.set_page_config(page_title="Material Intelligence Pro — Research Dashboard", page_icon="🧪", layout="wide")
 st.markdown(
     """
@@ -26,7 +28,6 @@ st.markdown(
     """, unsafe_allow_html=True
 )
 
-# Sidebar navigation
 st.sidebar.title("Material Intelligence Pro")
 st.sidebar.markdown("Research Dashboard — dark theme")
 page = st.sidebar.radio("Navigate", [
@@ -39,7 +40,6 @@ page = st.sidebar.radio("Navigate", [
     "Download / About"
 ])
 
-# Utilities: session state containers
 if "df" not in st.session_state:
     st.session_state.df = None
 if "scaler" not in st.session_state:
@@ -54,8 +54,9 @@ if "base_features" not in st.session_state:
     st.session_state.base_features = ["Su", "E", "G", "mu", "Ro"]
 if "targets" not in st.session_state:
     st.session_state.targets = ["Bhn", "HV", "Sy"]
+if "df_unscaled" not in st.session_state:
+    st.session_state.df_unscaled = None
 
-# Helper functions
 def safe_numeric(df, cols):
     for c in cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -108,7 +109,6 @@ def train_classifier(df, features, label_col, n_estimators=350, max_depth=12):
     cm = confusion_matrix(y_test, y_pred, labels=clf.classes_)
     return clf, acc, report, cm, clf.classes_
 
-# Page: Upload & Inspect
 if page == "Upload & Inspect":
     st.header("Upload & Inspect Data")
     st.write("Upload your CSV containing columns such as Su, Sy, E, G, mu, Ro, Bhn, HV (names are case-sensitive).")
@@ -117,6 +117,7 @@ if page == "Upload & Inspect":
         df = pd.read_csv(uploaded)
         df = df.rename(columns=lambda x: x.strip())
         st.session_state.df = df.copy()
+        st.session_state.df_unscaled = df.copy()  # FIX: keep pristine copy
         st.write("Columns detected:", list(df.columns))
         st.write("Preview:")
         st.dataframe(df.head(10))
@@ -125,7 +126,6 @@ if page == "Upload & Inspect":
         st.write("Basic statistics (numerical columns):")
         st.dataframe(df.describe().T)
 
-# Page: Imputation
 if page == "Imputation":
     st.header("Imputation (fill missing Bhn, HV, Sy using Random Forest regression)")
     if st.session_state.df is None:
@@ -141,7 +141,6 @@ if page == "Imputation":
 
         if st.button("Run regression-based imputation"):
             scaler = StandardScaler()
-            # scale in place only for columns present (handle missing cols gracefully)
             present_base = [c for c in base_features if c in df.columns]
             if len(present_base) < len(base_features):
                 st.error(f"Required base features missing: {set(base_features)-set(present_base)}")
@@ -163,18 +162,31 @@ if page == "Imputation":
                         st.warning(f"Not enough labeled rows to train regressor for {t}.")
                 st.session_state.regressors = regressors
                 st.session_state.df = df
+
+                df_unscaled = st.session_state.df_unscaled.copy()
+                df_unscaled = safe_numeric(df_unscaled, base_features + targets)
+                for t in targets:
+                    if t in regressors:
+                        mask = df_unscaled[t].isna()
+                        if mask.any():
+                            X_missing = df_unscaled.loc[mask, present_base]
+                            X_missing_scaled = scaler.transform(X_missing)
+                            df_unscaled.loc[mask, t] = regressors[t].predict(X_missing_scaled)
+                st.session_state.df_unscaled = df_unscaled
+
                 st.success("Imputation finished. Check dataset preview and missing counts.")
                 st.dataframe(df.head())
 
-# Page: Feature Engineering
 if page == "Feature Engineering":
     st.header("Feature Engineering")
     if st.session_state.df is None:
         st.warning("Upload and impute data first.")
     else:
         df = st.session_state.df.copy()
-        # Ensure numeric
+        df_unscaled = st.session_state.df_unscaled.copy()
         df = safe_numeric(df, ["Su", "Sy", "E", "G", "mu", "Ro", "Bhn", "HV"])
+        df_unscaled = safe_numeric(df_unscaled, ["Su", "Sy", "E", "G", "mu", "Ro", "Bhn", "HV"])
+
         df["StrengthRatio"] = df["Su"] / (df["Sy"] + 1e-6)
         df["ElasticityIndex"] = df["E"] / (df["G"] + 1e-6)
         df["Density_Modulus"] = df["Ro"] / (df["E"] + 1e-6)
@@ -183,14 +195,37 @@ if page == "Feature Engineering":
         st.dataframe(df[["Su", "Sy", "E", "G", "Ro", "StrengthRatio", "ElasticityIndex", "Density_Modulus"]].head())
 
         if st.button("Assign RealLife_Application (research rules)"):
-            df["RealLife_Application"] = df.apply(real_life_category_row, axis=1)
+            df_unscaled["RealLife_Application"] = df_unscaled.apply(real_life_category_row, axis=1)
+            df["RealLife_Application"] = df_unscaled["RealLife_Application"]
             st.session_state.df = df
-            st.success("Assigned RealLife_Application label with rule-based logic.")
-            st.dataframe(df["RealLife_Application"].value_counts().rename_axis("label").reset_index(name="count"))
+            st.session_state.df_unscaled = df_unscaled
+            st.success("Assigned RealLife_Application label with rule-based logic (computed on real-unit values).")
+            counts = df["RealLife_Application"].value_counts()
+            st.dataframe(counts.rename_axis("label").reset_index(name="count"))
 
-# Page: Modeling
+            st.warning(
+                "⚠️ Label leakage notice: `RealLife_Application` is computed directly from "
+                "**Bhn, HV, Su, Sy, Ro, and E** — the same raw columns used as model features. "
+                "This means the label is an algebraic function of the inputs, not an independent "
+                "ground truth. Expect inflated accuracy unless leaking features are removed or "
+                "the evaluation is interpreted with that caveat (see Modeling page)."
+            )
+
+            rare = counts[counts < MIN_CLASS_SAMPLES_FOR_CV]
+            if not rare.empty:
+                for cls, n in rare.items():
+                    st.error(
+                        f"⚠️ Class **'{cls}'** has only **{n} sample(s)** — too few for reliable "
+                        f"training or 5-fold stratified cross-validation (needs ≥{MIN_CLASS_SAMPLES_FOR_CV}). "
+                        f"This class will be excluded from modeling with a visible note on the Modeling page."
+                    )
+
 if page == "Modeling":
-    st.header("Model Training (Random Forest Classifier)")
+    st.header("Model Training & Rigorous Evaluation")
+    st.caption(
+        "This page reports both a held-out test split and 5-fold stratified cross-validation, "
+        "compares a model with and without HV, and flags signs of an inflated, non-trustworthy result."
+    )
     if st.session_state.df is None:
         st.warning("Prepare data first (upload → impute → feature engineer).")
     else:
@@ -201,19 +236,144 @@ if page == "Modeling":
             st.error("Missing columns required for modeling: " + ", ".join(missing))
         else:
             df = df.dropna(subset=required_cols)
-            features = st.session_state.base_features + st.session_state.targets + ["StrengthRatio", "ElasticityIndex", "Density_Modulus"]
-            st.session_state.features = features
             label = "RealLife_Application"
 
-            if st.button("Train classifier"):
-                clf, acc, report, cm, classes = train_classifier(df, features, label)
-                st.session_state.classifier = clf
-                st.write(f"Accuracy on held-out test set: {acc:.3f}")
-                st.text(report)
-                st.session_state.df = df
-                st.success("Classifier trained and stored in session.")
+            st.subheader("Class distribution before training")
+            counts = df[label].value_counts()
+            st.dataframe(counts.rename_axis("label").reset_index(name="count"))
 
-# Page: Visualizations
+            rare = counts[counts < MIN_CLASS_SAMPLES_FOR_CV]
+            excluded_classes = list(rare.index)
+            if excluded_classes:
+                for cls, n in rare.items():
+                    st.error(
+                        f"⚠️ Excluding **'{cls}'** ({n} sample(s)) from training/evaluation — "
+                        f"below the minimum of {MIN_CLASS_SAMPLES_FOR_CV} needed for stratified "
+                        f"5-fold CV. A model cannot learn or be reliably evaluated on this class "
+                        f"with so few examples; predictions for it would not be trustworthy."
+                    )
+                df = df[~df[label].isin(excluded_classes)].copy()
+                st.write(f"Rows remaining after exclusion: {len(df)}")
+
+            st.info(
+                "ℹ️ Reminder: `RealLife_Application` is a deterministic rule computed from "
+                "Bhn, HV, Su, Sy, Ro, E — all also used as classifier features. Treat any accuracy "
+                "above ~0.97 with suspicion; it likely reflects the model reconstructing the "
+                "labeling rule rather than learning a generalizable materials-science pattern."
+            )
+
+            base_feature_set = st.session_state.base_features + st.session_state.targets + [
+                "StrengthRatio", "ElasticityIndex", "Density_Modulus"
+            ]
+            features_A = base_feature_set
+            features_B = [f for f in base_feature_set if f != "HV"]
+            st.session_state.features = features_A  # used by the Predict page
+
+            def evaluate_model(df_model, feature_list, label_col, model_name):
+                X = df_model[feature_list]
+                y = df_model[label_col]
+
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=0.2, random_state=42, stratify=y)
+
+                clf = RandomForestClassifier(n_estimators=350, max_depth=12, random_state=42,
+                                              class_weight="balanced")
+                clf.fit(X_train, y_train)
+                y_pred = clf.predict(X_test)
+                test_acc = accuracy_score(y_test, y_pred)
+                _, _, test_macro_f1, _ = precision_recall_fscore_support(
+                    y_test, y_pred, average="macro", zero_division=0)
+                report = classification_report(y_test, y_pred, zero_division=0)
+                cm = confusion_matrix(y_test, y_pred, labels=clf.classes_)
+
+                skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+                cv_clf = RandomForestClassifier(n_estimators=350, max_depth=12, random_state=42,
+                                                 class_weight="balanced")
+                scoring = ["accuracy", "precision_macro", "recall_macro", "f1_macro"]
+                cv_results = cross_validate(cv_clf, X, y, cv=skf, scoring=scoring)
+
+                importances = pd.Series(clf.feature_importances_, index=feature_list).sort_values(ascending=False)
+
+                return {
+                    "clf": clf,
+                    "classes": clf.classes_,
+                    "test_acc": test_acc,
+                    "test_f1": test_macro_f1,
+                    "report": report,
+                    "cm": cm,
+                    "cv_acc_mean": cv_results["test_accuracy"].mean(),
+                    "cv_acc_std": cv_results["test_accuracy"].std(),
+                    "cv_prec_mean": cv_results["test_precision_macro"].mean(),
+                    "cv_rec_mean": cv_results["test_recall_macro"].mean(),
+                    "cv_f1_mean": cv_results["test_f1_macro"].mean(),
+                    "cv_f1_std": cv_results["test_f1_macro"].std(),
+                    "importances": importances,
+                }
+
+            def render_model_results(results, model_name):
+                st.markdown(f"#### {model_name}")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("CV Accuracy", f"{results['cv_acc_mean']:.3f}", f"± {results['cv_acc_std']:.3f}")
+                c2.metric("CV Macro F1", f"{results['cv_f1_mean']:.3f}", f"± {results['cv_f1_std']:.3f}")
+                c3.metric("Test Accuracy", f"{results['test_acc']:.3f}")
+                c4.metric("Test Macro F1", f"{results['test_f1']:.3f}")
+
+                if results["cv_acc_mean"] > 0.97:
+                    st.warning(
+                        f"⚠️ CV accuracy of {results['cv_acc_mean']:.3f} is suspiciously high for a "
+                        "5-class problem. This often indicates an easy/leaky labeling rule, a feature "
+                        "that encodes the label directly, or low label diversity — not necessarily a "
+                        "genuinely strong model. See the leakage notice above."
+                    )
+
+                with st.expander("Classification report"):
+                    st.text(results["report"])
+                with st.expander("Confusion matrix"):
+                    st.dataframe(pd.DataFrame(results["cm"], index=results["classes"], columns=results["classes"]))
+                with st.expander("Feature importances"):
+                    st.dataframe(results["importances"].reset_index().rename(
+                        columns={"index": "feature", 0: "importance"}))
+                    fig = px.bar(results["importances"].sort_values(), orientation="h",
+                                 title=f"{model_name} — Feature Importance")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            if st.button("Train & compare Model A (with HV) vs Model B (without HV)"):
+                results_A = evaluate_model(df, features_A, label, "Model A")
+                results_B = evaluate_model(df, features_B, label, "Model B")
+
+                render_model_results(results_A, "Model A — includes HV")
+                render_model_results(results_B, "Model B — excludes HV")
+
+                st.markdown("---")
+                st.subheader("Model recommendation")
+                gap = results_A["cv_acc_mean"] - results_B["cv_acc_mean"]
+                st.write(
+                    f"Model A (with HV) CV accuracy: **{results_A['cv_acc_mean']:.3f}** — "
+                    f"Model B (without HV) CV accuracy: **{results_B['cv_acc_mean']:.3f}** "
+                    f"(gap: {gap:.3f})."
+                )
+                st.write(
+                    "**Recommendation: treat Model B (without HV) as the primary research result.** "
+                    "HV had the weakest imputation quality of any target (R² ≈ 0.22 during the "
+                    "Imputation step, meaning ~90% of its values are model-predicted, not measured) "
+                    "yet dominated Model A's feature importance. A model that leans heavily on its "
+                    "least-reliable input is not trustworthy even if its accuracy is higher. Model B's "
+                    "modestly lower accuracy is a more honest estimate of what the model can actually "
+                    "generalize, built only on features with real physical measurements or well-imputed "
+                    "values (Bhn, Sy: R² ≈ 0.97)."
+                )
+                st.caption(
+                    "Note: because the label itself is rule-derived from several of the remaining "
+                    "features (Bhn, Su, Sy, Ro, E), even Model B's accuracy should be read as an "
+                    "upper bound on how well this specific rule can be reconstructed — not as a "
+                    "validated real-world materials classification result."
+                )
+
+                st.session_state.classifier = results_B["clf"]
+                st.session_state.features = features_B
+                st.session_state.df = df
+                st.success("Both models trained. Model B (without HV) stored as the active classifier for the Predict page.")
+
 if page == "Visualizations":
     st.header("Interactive Visualizations — Research View")
     if st.session_state.df is None:
@@ -248,9 +408,12 @@ if page == "Visualizations":
             fig4 = px.violin(df, x="RealLife_Application", y=selected_feature, box=True, points="all", color="RealLife_Application")
             st.plotly_chart(fig4, use_container_width=True)
 
-# Page: Predict
 if page == "Predict":
     st.header("Interactive Prediction (single sample) — Research Mode")
+    st.caption(
+        "The active classifier is whichever model was trained last on the Modeling page "
+        "(Model B — without HV — is stored by default as the more trustworthy option)."
+    )
     if st.session_state.classifier is None:
         st.warning("Train the classifier in 'Modeling' first.")
     else:
@@ -267,7 +430,6 @@ if page == "Predict":
             submitted = st.form_submit_button("Predict application")
 
         if submitted:
-            # Build DataFrame and scale base features the same way
             input_df = pd.DataFrame({
                 "Su": [Su], "E": [E], "G": [G], "mu": [mu], "Ro": [Ro], "Bhn": [Bhn], "HV": [HV], "Sy": [Sy]
             })
@@ -291,7 +453,6 @@ if page == "Predict":
                     st.write("Prediction probabilities:")
                     st.dataframe(probs.reset_index().rename(columns={"index": "class", 0: "probability"}))
 
-# Page: Download / About
 if page == "Download / About":
     st.header("Download & About")
     if st.session_state.df is None:
