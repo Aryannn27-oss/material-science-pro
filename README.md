@@ -1,131 +1,103 @@
 # Material Intelligence Pro — Research Dashboard
 
-Material Intelligence Pro is a research-oriented Streamlit-based dashboard designed for systematic analysis of materials science datasets. The tool integrates data inspection, machine-learning-based imputation, feature engineering, classification, visualization, and prediction within a single, reproducible workflow.
+Material Intelligence Pro is a research-oriented Streamlit dashboard for systematic analysis of materials science datasets. It integrates data inspection, ML-based imputation, feature engineering, classification, visualization, and prediction within a single, reproducible workflow — with an explicit focus on **methodological transparency**: every modeling decision (leakage sources, evaluation protocol, class imbalance handling) is disclosed and quantified rather than presented only as a headline accuracy number.
 
-This project is developed with an emphasis on **academic research use**, particularly aligned with practices common in **materials science and mechanical engineering laboratories**, including those in Japan, where clarity, methodological transparency, and reproducibility are prioritized.
+This project is developed with an emphasis on **academic research use**, aligned with practices common in materials science and mechanical engineering laboratories, including those in Japan, where clarity, methodological rigor, and reproducibility are prioritized over optimistic point estimates.
 
 ---
 
-## Overview
+## Dataset
 
-The objective of this project is to provide a unified platform for exploratory materials informatics studies. The dashboard enables researchers to preprocess incomplete experimental datasets, derive physically meaningful features, apply interpretable machine learning models, and visualize trends relevant to real-world material applications.
+- **1,552 samples**, 15 columns (material standard, ID, material name, heat treatment, and 8 numeric physical properties)
+- Missing values prior to imputation: `Bhn` — 1,089 (70.2%), `HV` — 1,387 (89.4%), `Sy` — 8 (0.5%)
 
 ---
 
 ## Functional Modules
 
 ### Data Upload and Inspection
-
-* Upload material property datasets in CSV format
-* Automatic detection and validation of column names
-* Summary of missing values and basic statistical descriptors
+CSV upload with automatic column validation, missing-value summary, and descriptive statistics.
 
 ### Machine Learning–Based Imputation
+Missing `Sy`, `Bhn`, and `HV` values are imputed with a `RandomForestRegressor` (n_estimators=250) trained on standardized base features (`Su`, `E`, `G`, `mu`, `Ro`), evaluated by held-out R² and RMSE:
 
-* Imputation of missing material properties:
+| Target | R² | RMSE |
+|---|---|---|
+| Bhn | 0.966 | 17.95 |
+| Sy | 0.966 | 49.19 |
+| HV | 0.219 | 194.65 |
 
-  * Yield Strength (Sy)
-  * Brinell Hardness (BHN)
-  * Vickers Hardness (HV)
-* Random Forest Regression trained on physically motivated base features
-* Quantitative evaluation using R² score and RMSE
-* Consistent feature scaling using StandardScaler
+`HV`'s imputation quality is substantially weaker than the other two targets — with ~89% of its values model-predicted rather than measured, it is treated as a lower-confidence feature downstream (see *Model Comparison* below) rather than assumed reliable by default.
 
 ### Feature Engineering
-
-The following physically interpretable features are derived:
-
-* StrengthRatio = Su / Sy
-* ElasticityIndex = E / G
-* Density_Modulus = Ro / E
-
-These features are used in downstream classification and visualization tasks.
+Physically interpretable derived features:
+- `StrengthRatio = Su / Sy`
+- `ElasticityIndex = E / G`
+- `Density_Modulus = Ro / E`
 
 ### Rule-Based Application Labeling
+A heuristic rule assigns each sample a `RealLife_Application` category (Tool Material, Aerospace Alloy, Automotive Alloy, Structural Steel, Lightweight Alloy, General Purpose) from established property thresholds. Resulting class distribution:
 
-A heuristic labeling scheme assigns a RealLife_Application category based on established material property ranges:
+| Class | Count |
+|---|---|
+| Tool Material | 805 |
+| Automotive Alloy | 354 |
+| Lightweight Alloy | 270 |
+| General Purpose | 104 |
+| Structural Steel | 17 |
+| Aerospace Alloy | 2 |
 
-* Tool Material
-* Aerospace Alloy
-* Automotive Alloy
-* Structural Steel
-* Lightweight Alloy
-* General Purpose
+**Labels are computed on unscaled, real-unit values** — an earlier iteration applied the same thresholds to standardized (post-`StandardScaler`) values, silently collapsing 3 of 5 categories to zero occurrences. This is corrected and documented in the pipeline as a methodological safeguard, not just a bug fix.
 
-These labels are intended for exploratory research and hypothesis generation and should not be interpreted as experimentally validated classifications.
+**Aerospace Alloy (n=2) is automatically excluded** from training and evaluation, since 5-fold stratified cross-validation requires at least 5 samples per class; the dashboard raises an explicit warning rather than silently dropping or misrepresenting this class.
 
-### Classification Model
+### Classification: Methodology and Leakage Audit
+Because `RealLife_Application` is a deterministic function of `Bhn`, `HV`, `Su`, `Sy`, `Ro`, and `E` — the same raw columns available as model inputs — naively training a classifier on all of them produces an inflated result (the model partially reconstructs the labeling rule rather than learning an independent pattern). The pipeline surfaces this explicitly and evaluates two models under a stricter protocol: `class_weight="balanced"`, a held-out test split, and **5-fold stratified cross-validation** reporting mean ± std accuracy and macro precision/recall/F1 (macro-averaging chosen specifically because the label distribution is imbalanced, ~52% Tool Material).
 
-* Random Forest Classifier trained on base, target, and engineered features
-* Prediction of material application category
-* Performance evaluation using held-out test accuracy and classification report
+| Metric | Model A (includes HV) | Model B (excludes HV) |
+|---|---|---|
+| CV Accuracy | 0.990 ± 0.007 | 0.957 ± 0.008 |
+| CV Macro F1 | 0.960 | 0.924 |
+| Held-out Test Accuracy | 0.990 | 0.945 |
+| Held-out Test Macro F1 | 0.982 | 0.917 |
+
+**Model B (excludes HV) is adopted as the primary reported result.** `HV` combines the weakest imputation quality of any feature (R²=0.22) with the highest feature importance in Model A — a model leaning hardest on its least-reliable input is not a trustworthy result even though its accuracy is nominally higher. The dashboard also raises an automatic warning whenever cross-validated accuracy exceeds 0.97, since this range is disproportionately likely to reflect rule-reconstruction rather than genuine generalization.
 
 ### Visualization and Analysis
-
-* Correlation matrices for feature relationships
-* Feature importance analysis from trained classifier
-* Three-dimensional clustering in Su–Sy–Ro space
-* Distribution analysis using class-wise violin plots
+Correlation matrices, classifier feature importance, 3D Su–Sy–Ro clustering, and class-wise violin plots.
 
 ### Interactive Prediction
-
-* Single-sample prediction using user-defined material properties
-* Output includes predicted application category and class probabilities when available
+Single-sample prediction with class probabilities, using whichever model was most recently trained (Model B stored by default).
 
 ### Data Export
-
-* Export of the fully processed dataset in CSV format
-* Ensures reproducibility across analysis sessions
+Full processed dataset exportable as CSV for reproducibility across sessions.
 
 ---
 
 ## Expected Data Format
 
-Input datasets must be provided as CSV files with the following case-sensitive columns.
+**Base properties:** `Su` (Ultimate Tensile Strength), `E` (Elastic Modulus), `G` (Shear Modulus), `mu` (Poisson's Ratio), `Ro` (Density)
+**Additional properties:** `Sy` (Yield Strength), `Bhn` (Brinell Hardness), `HV` (Vickers Hardness)
 
-### Base Properties
-
-* Su: Ultimate Tensile Strength
-* E: Elastic Modulus
-* G: Shear Modulus
-* mu: Poisson’s Ratio
-* Ro: Density
-
-### Additional Properties
-
-* Sy: Yield Strength
-* Bhn: Brinell Hardness
-* HV: Vickers Hardness
-
-Datasets may contain missing values; these are handled internally by the imputation pipeline.
+Column names are case-sensitive. Missing values are handled internally by the imputation pipeline.
 
 ---
 
 ## Implementation Details
 
-* Application Framework: Streamlit
-* Data Processing: Pandas, NumPy
-* Machine Learning: scikit-learn
-* Visualization: Plotly, Matplotlib, Seaborn
-
-### Models
-
-* RandomForestRegressor for property imputation
-* RandomForestClassifier for application classification
+- **Framework:** Streamlit
+- **Data processing:** Pandas, NumPy
+- **Machine learning:** scikit-learn (`RandomForestRegressor`, `RandomForestClassifier`, `StratifiedKFold`, `cross_validate`)
+- **Visualization:** Plotly, Matplotlib, Seaborn
 
 ---
 
 ## Execution Instructions
 
 ```bash
-# Clone repository
 git clone https://github.com/your-username/material-intelligence-pro.git
 cd material-intelligence-pro
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Launch application
 streamlit run app.py
 ```
 
@@ -133,19 +105,20 @@ streamlit run app.py
 
 ## Research Considerations
 
-* Imputation models are trained exclusively on samples with complete base properties
-* Feature scaling is applied prior to imputation and reused during prediction
-* Application labels are heuristic and intended for exploratory analysis
-* The system is designed for research and educational use, not for industrial deployment
+- Imputation models are trained exclusively on samples with complete base properties.
+- Feature scaling is applied prior to imputation and reused consistently at prediction time.
+- `RealLife_Application` labels are rule-derived and heuristic; because the rule shares input columns with the classifier, **even the leakage-mitigated Model B accuracy should be read as an upper bound on how well the model reconstructs the labeling rule, not as a validated real-world materials classification.**
+- The 99%-range accuracy an unaudited version of this pipeline would report is explicitly diagnosed, quantified, and reduced to a more defensible 0.957 ± 0.008 (5-fold CV) after removing the least-reliable, most leakage-prone feature.
+- This system is designed for research and educational use; validation by domain experts and experimental verification are required before any practical or industrial application.
 
 ---
 
 ## Intended Research Applications
 
-* Materials informatics and data-driven materials research
-* Preliminary analysis of experimental or compiled materials datasets
-* Demonstration of machine learning methodologies in engineering education
-* Feature importance and interpretability studies
+- Materials informatics and data-driven materials research
+- Preliminary analysis of experimental or compiled materials datasets
+- Demonstration of rigorous ML evaluation methodology (leakage auditing, cross-validation, imbalance handling) in engineering education
+- Feature importance and interpretability studies
 
 ---
 
