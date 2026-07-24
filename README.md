@@ -95,7 +95,7 @@ Column names are case-sensitive. Missing values are handled internally by the im
 ## Execution Instructions
 
 ```bash
-git clone https://github.com/your-username/material-intelligence-pro.git
+git clone https://github.com/Aryannn27-oss/material-intelligence-pro.git
 cd material-intelligence-pro
 pip install -r requirements.txt
 streamlit run app.py
